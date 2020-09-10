@@ -1,15 +1,16 @@
 import torch
 import numpy as np
-import irlco.sorting.sorting_env as sorting_env
+
+import irlco.sorting
 import irlco.pointer_transformer as pt
 
 # Initialise sequence sampler and reward model
-sequence_sampler = sorting_env.uniform_sequence_sampler(3, 8, 0.0, 10.0)
-reward_model = sorting_env.sorted_terminal_reward
+sequence_sampler = irlco.sorting.uniform_sampler_generator(3, 8, 0.0, 10.0)
+reward_model = irlco.sorting.sorted_terminal_reward
 
 # Initialise environment that samples initial states using sequence_sampler and returns reward from states
 # according to reward_model
-env = sorting_env.SortingEnv(reward_model, sequence_sampler)
+env = irlco.sorting.SortingEnv(reward_model, sequence_sampler)
 
 # Initialise pointer transformer policy network
 policy = pt.PointerTransformer(32, 1, 3, 3, 64)
