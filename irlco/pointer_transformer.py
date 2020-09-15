@@ -6,13 +6,17 @@ from typing import Optional, Callable
 
 
 class PointerTransformerDecoderLayer(nn.Module):
+    """
+    Final decoder layer in the pointer transformer. Differs from a regular transformer decoder layer only slightly -
+    instead of 
+    """
     def __init__(self, d_model: int, nhead: int, dim_feedforward: int = 2048, dropout: float = 0.1,
                  activation: str = "relu"):
         super(PointerTransformerDecoderLayer, self).__init__()
         self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout)
         self.multihead_attn = nn.MultiheadAttention(d_model, nhead, dropout)
         self.logit = nn.Linear(d_model, 1)
-        self.softmax = nn.Softmax(dim=0)
+        self.softmax = nn.Softmax(dim=1)
 
         self.dropout = nn.Dropout(dropout)
         self.norm = nn.LayerNorm(d_model)
@@ -23,9 +27,11 @@ class PointerTransformerDecoderLayer(nn.Module):
         tgt2 = self.self_attn(tgt, tgt, tgt, attn_mask=tgt_mask, key_padding_mask=tgt_key_padding_mask)[0]
         tgt = tgt + self.dropout(tgt2)
         tgt = self.norm(tgt)
-        tgt2 = self.multihead_attn(tgt, memory, memory, attn_mask=memory_mask, key_padding_mask=memory_key_padding_mask)[0]
-        logits = self.logit(tgt2)
-        probs = self.softmax(logits)
+        # Instead of returning the attention-weighted sum, return the weights over the source sequence for the last
+        # element of the target sequence
+        weights = self.multihead_attn(tgt, memory, memory, attn_mask=memory_mask, key_padding_mask=memory_key_padding_mask)[1][:,-1,:]
+        # Treat weights as logits since they don't actually sum to 1 - apply additive mask to logits
+        probs = self.softmax(weights + memory_mask[-1, :])
 
         return probs
 
