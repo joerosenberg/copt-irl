@@ -82,6 +82,7 @@ def sorting_input_embedding(input: torch.Tensor) -> torch.Tensor:
     """
     return torch.einsum('i,j->ij', input, embedding_weights)
 
+
 # State & action representation:
 # ([x_1, ..., x_n], [a_1, ..., a_m]) where m <= n
 # [x_1, ..., x_n] is the unordered sequence (we want to learn how to sort this!)
