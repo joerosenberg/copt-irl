@@ -1,4 +1,4 @@
-from typing import Tuple, List, Callable
+from typing import Tuple, List, Callable, Optional
 
 import numpy as np
 import torch
@@ -7,6 +7,10 @@ from torch import Tensor
 
 SortingState = Tuple[Tensor, List[int]]
 SortingStateBatch = Tuple[Tensor, Tensor]
+
+# Change this to 'cpu' if GPU is unavailable
+DEVICE = torch.device('cuda')
+
 
 class BatchSortingEnv(Env):
     """
@@ -57,6 +61,9 @@ class BatchSortingEnv(Env):
             # Append actions to state descriptions
             prev_actions_batch = torch.cat((prev_actions_batch, actions), 1)
 
+        # Update state by
+        self.state_batch = (unsorted_seq_batch, prev_actions_batch)
+
         # Calculate reward for transitioning into the new state.
         rewards = self.batch_reward_model(self.state_batch)
 
@@ -80,8 +87,8 @@ def generate_batch_uniform_sampler(size_low: int, size_high: int, entry_low: flo
         # Sample sequence length from {size_low, ..., size_high}
         length = np.random.randint(size_low, size_high + 1)
         # Sample each entry from [number_low, number_high]
-        unsorted_seq_batch = entry_low + (entry_high - entry_low) * torch.rand((batch_size, length))
-        initial_actions = torch.zeros((batch_size, 0))
+        unsorted_seq_batch = entry_low + (entry_high - entry_low) * torch.rand((batch_size, length), device=DEVICE)
+        initial_actions = torch.zeros((batch_size, 0), dtype=torch.int64, device=DEVICE)
         # Return initial state; action_seq is empty because we haven't sorted anything yet.
         return unsorted_seq_batch, initial_actions
 
@@ -98,12 +105,12 @@ def batch_sorted_terminal_reward(state: SortingStateBatch) -> Tensor:
 
     if nb_actions_taken < episode_length:
         # If we aren't at the end of the episodes, give 0 reward everywhere
-        return torch.zeros((batch_size, 1))
+        return torch.zeros((batch_size, 1), device=DEVICE)
     else:
         # If we're at the end, find the episodes where the unsorted sequences have been correctly sorted and give a
         # reward of 1 for these. Give a reward of -1 everywhere else.
         # Get correctly sorted sequences:
-        answer_batch = torch.sort(unsorted_seq_batch, dim=1)
+        answer_batch, _ = torch.sort(unsorted_seq_batch, dim=1)
         # Get the proposed sorted sequences:
         proposal_batch = torch.gather(unsorted_seq_batch, 1, action_seq_batch)
         # Check equality of each element
@@ -114,6 +121,30 @@ def batch_sorted_terminal_reward(state: SortingStateBatch) -> Tensor:
         # TODO: use the proper way to do this, i.e. not using arithmetic operations.
         return (episodes_correct.int().unsqueeze(1) * 2) - 1
 
+
+def batch_stepwise_reward(state_batch: SortingStateBatch) -> float:
+    """
+    Non-sparse reward for the sorting environment.
+
+    Args:
+        state: Calculate the reward for transitioning into this state.
+
+    Returns:
+        +1.0 if the sequence has been correctly sorted so far, and -1.0 if it is incorrectly sorted.
+    """
+    unsorted_seq_batch, action_seq_batch = state_batch
+
+    nb_actions_taken = action_seq_batch.shape[1]
+
+    # Get the partially sorted sequence from the indices
+    partial_proposal_batch = torch.gather(unsorted_seq_batch, 1, action_seq_batch)
+    partial_answer_batch = torch.sort(unsorted_seq_batch, dim=1)[0][:, :nb_actions_taken]
+
+    element_matches = torch.eq(partial_answer_batch, partial_proposal_batch)
+    episodes_correct = torch.prod(element_matches, 1)
+    reward_batch = (episodes_correct.int().unsqueeze(1) * 2) - 1
+
+    return reward_batch
 
 class SortingEnv(Env):
     """

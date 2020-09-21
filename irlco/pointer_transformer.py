@@ -13,10 +13,16 @@ class PointerTransformerDecoderLayer(nn.Module):
     def __init__(self, d_model: int, nhead: int, dim_feedforward: int = 2048, dropout: float = 0.1,
                  activation: str = "relu"):
         super(PointerTransformerDecoderLayer, self).__init__()
+        # First multihead attention block: uses self attention on outputs from previous layer.
+        # Masked so that outputs do not attend to other outputs corresponding to future actions.
         self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout)
+        # Second multihead attention block: attends
         self.multihead_attn = nn.MultiheadAttention(d_model, nhead, dropout)
-        self.logit = nn.Linear(d_model, 1)
+        #self.logit = nn.Linear(d_model, 1)
+        self.tanh = nn.Tanh()
         self.softmax = nn.Softmax(dim=1)
+
+        self.nhead = nhead
 
         self.dropout = nn.Dropout(dropout)
         self.norm = nn.LayerNorm(d_model)
@@ -30,8 +36,14 @@ class PointerTransformerDecoderLayer(nn.Module):
         # Instead of returning the attention-weighted sum, return the weights over the source sequence for the last
         # element of the target sequence
         weights = self.multihead_attn(tgt, memory, memory, attn_mask=memory_mask, key_padding_mask=memory_key_padding_mask)[1][:,-1,:]
-        # Treat weights as logits since they don't actually sum to 1 - apply additive mask to logits
-        probs = self.softmax(weights + memory_mask[-1, :])
+
+        # Clip weights into [-10, 10] using tanh to get logits
+        logits = self.tanh(weights) * 10.0
+
+        # Get probabilities by taking softmax of logits (with masking for actions that have already been selected)
+        bsize = tgt.shape[1]
+        idx = torch.arange(0, bsize * self.nhead, self.nhead, dtype=torch.int64)
+        probs = self.softmax(logits + memory_mask[idx, -1, :])
 
         return probs
 
