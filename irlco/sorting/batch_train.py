@@ -3,10 +3,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 from torch import Tensor
 import csv
-
+import wandb
 import irlco.sorting
 import irlco.pointer_transformer as pt
-
 
 # Check if CUDA device is available - use this if possible, otherwise use CPU
 if torch.cuda.is_available():
@@ -14,15 +13,10 @@ if torch.cuda.is_available():
 else:
     device = torch.device('cpu')
 
-# Open file for logging
-LOG_PATH = "../../logs/sorting.csv"
-log_file = open(LOG_PATH, 'w', newline='\n')
-csv_writer = csv.writer(log_file)
-
 # Constants:
 # Dimensions of transformer embedding dim. and number of heads for multihead attention
-EMBEDDING_DIM = 128
-NB_HEADS = 8
+EMBEDDING_DIM = 16
+NB_HEADS = 4
 assert EMBEDDING_DIM % NB_HEADS == 0, "Embedding dim must be divisible by the number of heads"
 # Min and max sequence length
 MIN_SEQ_LENGTH = 3
@@ -32,11 +26,25 @@ MIN_ENTRY = 0.0
 MAX_ENTRY = 10.0
 # Batch size
 BATCH_SIZE = 2048
+
 # Epsilon
 EPS = 1e-8
 
 # Optimiser parameters
-LR = 1e-3
+LR = 1e-4
+
+# Initialise wandb logging
+wandb.init(project='sorting', config={
+    "embedding_dimension": EMBEDDING_DIM,
+    "nb_heads": NB_HEADS,
+    "min_seq_length": MIN_SEQ_LENGTH,
+    "max_seq_length": MAX_SEQ_LENGTH,
+    "min_seq_entry": MIN_ENTRY,
+    "max_seq_entry": MAX_ENTRY,
+    "batch_size": BATCH_SIZE,
+    "learning_rate": LR
+})
+
 
 
 # Initialise sequence sampler and reward model
@@ -52,6 +60,9 @@ env = irlco.sorting.BatchSortingEnv(reward_model, sequence_sampler)
 # Initialise pointer transformer for the policy network
 policy = pt.PointerTransformer(d_model=EMBEDDING_DIM, nhead=NB_HEADS, num_encoder_layers=3, num_decoder_layers=3,
                                dim_feedforward=64).to(device=device)
+
+# Watch model
+wandb.watch(policy)
 
 # Number of batches to train for:
 nb_batches = 20_000
@@ -134,6 +145,12 @@ def generate_batch_of_sorted_element_masks(prev_actions_batch: Tensor, input_seq
 # Input embedding: just use a random linear map R -> R^{EMBEDDING_DIM}
 embedding_weights = torch.rand(EMBEDDING_DIM, device=device) - 0.5
 
+# Constant embedding
+#embedding_weights = torch.ones(EMBEDDING_DIM, device=device)
+
+# Log embedding weights
+wandb.config.embedding_weights = embedding_weights.cpu()
+
 
 def sorting_input_embedding(input: Tensor) -> Tensor:
     """
@@ -161,8 +178,10 @@ for b in range(nb_batches):
     # Reset the episode
     state_batch = env.reset()
 
+    # Get episode length so we know how many timesteps we need to iterate for
     episode_length = state_batch[0].shape[1]
 
+    # Create empty tensors for storing action energies (log-probabilities) and rewards - used for model update
     episode_energies = torch.zeros((BATCH_SIZE, episode_length), device=device)
     episode_rewards = torch.zeros((BATCH_SIZE, episode_length), device=device)
 
@@ -216,8 +235,7 @@ for b in range(nb_batches):
     epoch_returns[:, b] = episode_returns[:, 0].clone()
 
     # Log average entire episode returns
-    print([b, torch.mean(epoch_returns[:, b]).tolist()])
-    csv_writer.writerow([b, torch.mean(epoch_returns[:, b]).tolist()])
+    wandb.log({'batch': b, 'average_return': torch.mean(epoch_returns[:, b]).tolist()})
 
     # Calculate policy loss and gradients
     # Minus sign is because J = sum(episode_energies * episode_returns) is the 'average return' performance measure
@@ -232,7 +250,6 @@ for b in range(nb_batches):
     if (b + 1) % 100 == 0:
         print(f"Completed episode {b+1}/{nb_batches}.")
         print(f"Average return was {torch.mean(epoch_returns[:, b])}.")
-        log_file.flush()
 
 plt.plot(np.cumsum(epoch_returns))
 plt.savefig('sorting_epoch_returns.png')

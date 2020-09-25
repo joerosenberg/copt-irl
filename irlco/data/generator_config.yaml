@@ -1,0 +1,31 @@
+---
+name: Size 3
+instance_size: 3
+nb_instances: 1000
+nb_top_solutions: 2
+output_file: size_3_solns.yaml
+---
+name: Size 4
+instance_size: 4
+nb_instances: 2000
+nb_top_solutions: 3
+output_file: size_4_solns.yaml
+---
+name: Size 5
+instance_size: 5
+nb_instances: 5000
+nb_top_solutions: 5
+output_file: size_5_solns.yaml
+---
+name: Size 6
+instance_size: 6
+nb_instances: 3000
+nb_top_solutions: 5
+output_file: size_6_solns.yaml
+---
+name: Size 7
+instance_size: 7
+nb_instances: 3000
+nb_top_solutions: 5
+output_file: size_6_solns.yaml
+---

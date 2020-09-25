@@ -13,9 +13,11 @@ class PointerTransformerDecoderLayer(nn.Module):
     def __init__(self, d_model: int, nhead: int, dim_feedforward: int = 2048, dropout: float = 0.1,
                  activation: str = "relu"):
         super(PointerTransformerDecoderLayer, self).__init__()
+
         # First multihead attention block: uses self attention on outputs from previous layer.
         # Masked so that outputs do not attend to other outputs corresponding to future actions.
         self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout)
+
         # Second multihead attention block: attends
         self.multihead_attn = nn.MultiheadAttention(d_model, nhead, dropout)
         #self.logit = nn.Linear(d_model, 1)
