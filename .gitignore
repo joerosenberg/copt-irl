@@ -11,3 +11,8 @@ venv/
 
 # Ignore log files.
 logs/
+
+# Ignore generated training data.
+irlco/data/*.yaml
+# Don't ignore configs.
+!irlco/data/*config.yaml
