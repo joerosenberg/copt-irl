@@ -3,6 +3,8 @@ import yaml
 from typing import List, Dict
 from tqdm import tqdm
 import os.path
+from pathlib import Path
+import re
 
 
 def top_solutions(problem_instance, n_top: int) -> List[Dict]:
@@ -20,7 +22,7 @@ def top_solutions(problem_instance, n_top: int) -> List[Dict]:
     all_solutions = copt.bruteForce(problem_instance)
     # Get best n_top solutions
     best_solns = all_solutions[:n_top]
-    # If any of the best solutions are failures, return nothing
+    # If any of the best solutions are failures, retry with a new problem instance
     for i in range(len(best_solns)):
         if best_solns[i]['success'] == 0:
             return []
@@ -45,13 +47,38 @@ def generate_data(config_path):
             out = open(output_file, 'w')
 
         for i in tqdm(range(nb_instances)):
-            problem = copt.getProblem(instance_size)
-            best_solns = top_solutions(problem, nb_top_solutions)
+            best_solns = []
+            # Keep generating problems until we get successful connections
+            while not best_solns:
+                problem = copt.getProblem(instance_size)
+                best_solns = top_solutions(problem, nb_top_solutions)
             # Get rid of path data since we don't need it, and add instance description to each dict
             for soln in best_solns:
                 del soln['pathData']
                 soln['instance'] = problem
+            if i > 0:
+                out.write('---\n')
             yaml.dump_all(best_solns, out)
+
+
+def fix_separators(config_path):
+    """
+    Fixes separators for the data files listed in config_path.
+    Args:
+        config_path: Location of the config file used to generate the data files.
+
+    Returns: Nothing
+
+    """
+    regex = r"(success: 1\nfailedConnections)"
+    subst = "success: 1\\n---\\nfailedConnections"
+
+    parent_dir = Path(config_path).parent
+    for entry in yaml.load_all(open(config_path, 'r')):
+        data_file = open(parent_dir / Path(entry['output_file']), 'rw')
+        content = data_file.read()
+        fixed_content = re.sub(regex, subst, content)
+        data_file.write(fixed_content)
 
 
 if __name__ == '__main__':

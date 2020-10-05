@@ -13,6 +13,8 @@ venv/
 logs/
 
 # Ignore generated training data.
-irlco/data/*.yaml
+*.yaml
 # Don't ignore configs.
-!irlco/data/*config.yaml
+!*config.yaml
+
+wandb/

@@ -1,8 +1,9 @@
 import torch
 import torch.nn as nn
-from torch.nn import TransformerDecoderLayer, TransformerDecoder, Transformer, TransformerEncoder, TransformerEncoderLayer
+from torch.nn import TransformerDecoderLayer, TransformerDecoder, Transformer, TransformerEncoder, \
+    TransformerEncoderLayer, Linear
 from torch import Tensor
-from typing import Optional, Callable
+from typing import Optional, Callable, Tuple
 
 
 class PointerTransformerDecoderLayer(nn.Module):
@@ -20,9 +21,8 @@ class PointerTransformerDecoderLayer(nn.Module):
 
         # Second multihead attention block: attends
         self.multihead_attn = nn.MultiheadAttention(d_model, nhead, dropout)
-        #self.logit = nn.Linear(d_model, 1)
         self.tanh = nn.Tanh()
-        self.softmax = nn.Softmax(dim=1)
+        self.softmax = nn.Softmax(dim=2)
 
         self.nhead = nhead
 
@@ -37,16 +37,21 @@ class PointerTransformerDecoderLayer(nn.Module):
         tgt = self.norm(tgt)
         # Instead of returning the attention-weighted sum, return the weights over the source sequence for the last
         # element of the target sequence
-        weights = self.multihead_attn(tgt, memory, memory, attn_mask=memory_mask, key_padding_mask=memory_key_padding_mask)[1][:,-1,:]
+        weights = self.multihead_attn(tgt, memory, memory, attn_mask=memory_mask,
+                                      key_padding_mask=memory_key_padding_mask)[1]
 
-        # Clip weights into [-10, 10] using tanh to get logits
-        logits = self.tanh(weights) * 10.0
+        # Clip weights into [-10, 10] using tanh to get scores for actions
+        scores = self.tanh(weights) * 10.0
 
-        # Get probabilities by taking softmax of logits (with masking for actions that have already been selected)
+        # Mask actions and calculate probabilities (masking for actions that have already been selected)
         bsize = tgt.shape[1]
         idx = torch.arange(0, bsize * self.nhead, self.nhead, dtype=torch.int64)
-        probs = self.softmax(logits + memory_mask[idx, -1, :])
+        scores = scores + memory_mask[idx, :, :]
+        # Take softmax over last index, since that is the index corresponding to the source sequence and we want a
+        # probability distribution over the source sequence.
+        probs = self.softmax(scores)
 
+        # We don't take softmax here because the log probabilities are used when calculating the policy objective
         return probs
 
 
@@ -85,8 +90,8 @@ class PointerTransformer(Transformer):
 
     $$ A(Q, K, V) = \text{softmax}( QK^T / \sqrt{d_k} ) V $$
 
-    All we have to do to get the desired output is modify the last decoder layer to output these scores directly,
-    rather than
+    All we have to do to get the desired output is modify the last decoder layer to output the scores QK^T / \sqrt{d_k}
+    directly, rather than using them as weights.
     """
 
     def __init__(self, d_model: int = 512, nhead: int = 8, num_encoder_layers: int = 6, num_decoder_layers: int = 6,
@@ -116,3 +121,74 @@ class PointerTransformer(Transformer):
 
         self.d_model = d_model
         self.nhead = nhead
+
+
+class TwinDecoderPointerTransformer(Transformer):
+    """
+    Transformer with two separate decoders (outputs) - one outputs action log probabilities, the other outputs learned
+    rewards.
+    """
+    def __init__(self, d_input: int, d_model: int, nhead: int, num_encoder_layers: int, num_decoder_layers: int, dim_feedforward: int,
+                 dropout: float, activation: str = "relu"):
+        super(Transformer, self).__init__()
+
+        encoder_layer = TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout, activation)
+        encoder_norm = nn.LayerNorm(d_model)
+
+        # Input embedding
+        self.input_embedding = Linear(d_input, d_model)
+
+        self.encoder = TransformerEncoder(encoder_layer, num_encoder_layers, encoder_norm)
+
+        decoder_layer = TransformerDecoderLayer(d_model, nhead, dim_feedforward, dropout, activation)
+        pointer_layer = PointerTransformerDecoderLayer(d_model, nhead, dim_feedforward, dropout, activation)
+        decoder_norm = nn.LayerNorm(d_model)
+
+        # We have two decoders: one for producing action log-probs, the other for producing rewards.
+        self.action_decoder = PointerTransformerDecoder(decoder_layer, pointer_layer, num_decoder_layers, decoder_norm)
+        self.reward_decoder = TransformerDecoder(decoder_layer, num_decoder_layers, decoder_norm)
+        self.reward_feedforward = nn.Sequential(
+            Linear(d_model, dim_feedforward),
+            nn.ReLU(),
+            Linear(dim_feedforward, dim_feedforward),
+            nn.ReLU(),
+            Linear(dim_feedforward, 1)
+        )
+
+        self._reset_parameters()
+
+        self.d_model = d_model
+        self.d_input = d_input
+        self.nhead = nhead
+
+    def forward(self, src: Tensor, tgt: Tensor, src_mask: Optional[Tensor] = None, tgt_mask: Optional[Tensor] = None,
+                memory_mask: Optional[Tensor] = None, src_key_padding_mask: Optional[Tensor] = None,
+                tgt_key_padding_mask: Optional[Tensor] = None,
+                memory_key_padding_mask: Optional[Tensor] = None) -> Tensor:
+        if src.size(1) != tgt.size(1):
+            raise RuntimeError("the batch number of src and tgt must be equal")
+
+        if src.size(2) != self.d_input or tgt.size(2) != self.d_input:
+            raise RuntimeError("the feature number of src and tgt must be equal to d_input")
+
+        embedded_src = self.input_embedding(src)
+        embedded_tgt = self.input_embedding(tgt)
+
+        memory = self.encoder(embedded_src, mask=src_mask, src_key_padding_mask=src_key_padding_mask)
+        action_probs = self.action_decoder(embedded_tgt, memory, tgt_mask=tgt_mask, memory_mask=memory_mask,
+                                           tgt_key_padding_mask=tgt_key_padding_mask,
+                                           memory_key_padding_mask=memory_key_padding_mask)
+        return action_probs
+
+    def shaping_terms(self, src: Tensor, tgt: Tensor, src_mask: Optional[Tensor] = None, tgt_mask: Optional[Tensor] = None,
+                      memory_mask: Optional[Tensor] = None, src_key_padding_mask: Optional[Tensor] = None,
+                      tgt_key_padding_mask: Optional[Tensor] = None,
+                      memory_key_padding_mask: Optional[Tensor] = None) -> Tensor:
+        embedded_src = self.input_embedding(src)
+        embedded_tgt = self.input_embedding(tgt)
+        memory = self.encoder(embedded_src, mask=src_mask, src_key_padding_mask=src_key_padding_mask)
+        decoder_output = self.reward_decoder(embedded_tgt, memory, tgt_mask=tgt_mask, memory_mask=memory_mask,
+                                             tgt_key_padding_mask=tgt_key_padding_mask,
+                                             memory_key_padding_mask=memory_key_padding_mask)
+        shaping_terms = self.reward_feedforward(decoder_output)
+        return shaping_terms

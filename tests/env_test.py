@@ -1,10 +1,9 @@
-import irlco.copt_env
-import numpy as np
+import irlco.routing.env_old
 import copt
 
 # Create a new unconnected state
 problem_instance = copt.getProblem(6)
-state = irlco.copt_env.CircuitRoutingState(problem_instance)
+state = irlco.routing.env_old.CircuitRoutingState(problem_instance)
 assert state.get_problem_size() == 6
 print(state.get_connected_base_pairs())
 assert state.get_connected_base_pairs() == []
