@@ -1,0 +1,18 @@
+# Config for generating the data used to learn rewards for the circuit routing task.
+name: Size 3
+instance_size: 3
+nb_instances: 25000
+nb_top_solutions: 1
+output_file: irL_3.yaml
+---
+name: Size 4
+instance_size: 4
+nb_instances: 25000
+nb_top_solutions: 1
+output_file: irl_4.yaml
+---
+name: Size 5
+instance_size: 5
+nb_instances: 12500
+nb_top_solutions: 2
+output_file: irl_5.yaml

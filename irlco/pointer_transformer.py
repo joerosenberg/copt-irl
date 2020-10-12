@@ -152,7 +152,8 @@ class TwinDecoderPointerTransformer(Transformer):
             nn.ReLU(),
             Linear(dim_feedforward, dim_feedforward),
             nn.ReLU(),
-            Linear(dim_feedforward, 1)
+            Linear(dim_feedforward, 1),
+            nn.Tanh()
         )
 
         self._reset_parameters()

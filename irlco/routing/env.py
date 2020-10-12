@@ -21,16 +21,14 @@ class BatchCircuitRoutingEnv(Env):
 
     def reset(self, instances=None) -> RoutingStateBatch:
         if instances is None:
-            instance_size = randint(self.min_instance_size, self.max_instance_size + 1)
-            self.state_batch = (torch.zeros(instance_size, self.batch_size, 4, device=DEVICE),
+            instance_size = randint(self.min_instance_size, self.max_instance_size)
+            self.state_batch = (generate_valid_instances(instance_size, self.batch_size),
                                 torch.zeros(self.batch_size, 0, device=DEVICE, dtype=torch.long))
+
         else:
             assert instances.shape[1] == self.batch_size
             instance_size = instances.shape[0]
             self.state_batch = (instances, torch.zeros(self.batch_size, 0, device=DEVICE, dtype=torch.long))
-
-        for i in range(self.batch_size):
-            self.state_batch[0][:, i, :] = torch.tensor(copt.getProblem(instance_size), device=DEVICE)
 
         return self.state_batch
 
@@ -56,14 +54,42 @@ class BatchCircuitRoutingEnv(Env):
         return self.state_batch, terminal
 
 
-def measures_to_terminal_rewards(episode_length: int, measures: Tensor) -> Tensor:
+def measures_to_terminal_rewards(episode_length: int, measures: Tensor, successes=None) -> Tensor:
     """
     Prototype mapping from measures to terminal rewards.
     Args:
         episode_length:
         measures:
+        successes:
 
     Returns:
 
     """
-    return - measures / (1000 * episode_length)
+    if successes is None:
+        return 2.0 - measures / (1000 * episode_length)
+    else:
+        # Give terminal reward of -2 to unsuccessful connections
+        return (2.0 - measures / (1000 * episode_length)).masked_fill(torch.logical_not(successes), -5.0)
+
+
+def generate_valid_instances(instance_size: int, batch_size: int):
+    """
+    Generates a list of valid problems (i.e. neighbouring points are >=30 units away from eachother.)
+    Args:
+        batch_size: Number of problems to generate
+
+    Returns:
+
+    """
+    base_pairs = torch.zeros(instance_size, batch_size, 4, device=DEVICE)
+    for i in range(batch_size):
+        while True:
+            instance = torch.FloatTensor(copt.getProblem(instance_size))
+            # Compute (euclidean) distances between neighbouring points
+            sq = torch.square(instance[1:] - instance[:-1])
+            start_dists_sq = sq[:, 0] + sq[:, 1]
+            end_dists_sq = sq[:, 2] + sq[:, 3]
+            if torch.ge(start_dists_sq, 30**2).all() and torch.ge(end_dists_sq, 30**2).all():
+                base_pairs[:, i, :] = instance
+                break
+    return base_pairs

@@ -5,6 +5,8 @@ from tqdm import tqdm
 import os.path
 from pathlib import Path
 import re
+import gc
+from multiprocessing import Process, Queue
 
 
 def top_solutions(problem_instance, n_top: int) -> List[Dict]:
@@ -30,9 +32,16 @@ def top_solutions(problem_instance, n_top: int) -> List[Dict]:
     return all_solutions[:n_top]
 
 
+def top_solutions_mp(problem_instance, n_top: int, queue: Queue):
+    # Wraps top_solutions so it can be run in a separate process.
+    result = top_solutions(problem_instance, n_top)
+    queue.put(result)
+
+
 def generate_data(config_path):
     config_file = open(config_path)
     configs = yaml.load_all(config_file)
+    queue = Queue()
 
     for config in configs:
         instance_size = config['instance_size']
@@ -44,21 +53,24 @@ def generate_data(config_path):
         if os.path.exists(output_file):
             continue
         else:
-            out = open(output_file, 'w')
-
-        for i in tqdm(range(nb_instances)):
-            best_solns = []
-            # Keep generating problems until we get successful connections
-            while not best_solns:
-                problem = copt.getProblem(instance_size)
-                best_solns = top_solutions(problem, nb_top_solutions)
-            # Get rid of path data since we don't need it, and add instance description to each dict
-            for soln in best_solns:
-                del soln['pathData']
-                soln['instance'] = problem
-            if i > 0:
-                out.write('---\n')
-            yaml.dump_all(best_solns, out)
+            with open(output_file, 'w') as out:
+                for i in tqdm(range(nb_instances)):
+                    best_solns = []
+                    # Keep generating problems until we get successful connections
+                    while not best_solns:
+                        problem = copt.getProblem(instance_size)
+                        # Start new process to work around copt.bruteForce() memory leak
+                        process = Process(target=top_solutions_mp, args=(problem, nb_top_solutions, queue))
+                        process.start()
+                        best_solns = queue.get()
+                        process.join()
+                    # Get rid of path data since we don't need it, and add instance description to each dict
+                    for soln in best_solns:
+                        del soln['pathData']
+                        soln['instance'] = problem
+                    if i > 0:
+                        out.write('---\n')
+                    yaml.dump_all(best_solns, out)
 
 
 def fix_separators(config_path):

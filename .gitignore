@@ -17,4 +17,5 @@ logs/
 # Don't ignore configs.
 !*config.yaml
 
+*/wandb/
 wandb/

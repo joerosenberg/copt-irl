@@ -18,6 +18,7 @@ class CircuitSolutionDataset(Dataset):
         self.measures = []
         self.indices = {}
         self.episode_indices = {}
+        self.nb_episodes_stored = {}
 
         # Tracks index for each entry we add
         index = 0
@@ -45,9 +46,7 @@ class CircuitSolutionDataset(Dataset):
                 self.measures[i][j, 0] = float(data_entry['measure'])
                 self.indices[index] = (i, j)
                 index += 1
-
-            assert not (self.solutions[i][:, -1] == 0).all(), \
-                f"{config_entry['output_file']} does not contain all solutions!"
+                self.nb_episodes_stored[instance_size] = j + 1
 
     def __len__(self):
         # Read lengths of each data file from the config file and sum them to obtain total length
@@ -70,21 +69,11 @@ class CircuitSolutionDataset(Dataset):
     def get_batch(self, episode_length, batch_size, device):
         # Get data for episodes of requested length:
         episode_index = self.episode_indices[episode_length]
+        dataset_size = self.nb_episodes_stored[episode_length]
         instances = self.instances[episode_index]
         solutions = self.solutions[episode_index]
         measures = self.measures[episode_index]
         # Sample indices
-        dataset_size = len(measures)
         batch_indices = torch.randint(0, dataset_size, [batch_size])
         return instances[:, batch_indices, :].to(device), solutions[:, batch_indices].to(device), \
                measures[batch_indices, :].to(device)
-
-
-
-
-
-
-
-
-
-
