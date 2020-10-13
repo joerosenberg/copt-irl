@@ -23,7 +23,7 @@ def shaping_terms_to_rewards(shaping_terms, terminal_rewards, device=torch.devic
     batch_size = shaping_terms.shape[1]
 
     rewards = torch.zeros((episode_length, batch_size, 1), device=device)
-    #rewards += shaping_terms # + h(s')
-    #rewards[1:] -= shaping_terms[:-1] # - h(s)
+    rewards += shaping_terms # + h(s')
+    rewards[1:] -= shaping_terms[:-1] # - h(s)
     rewards[-1, :, :] += terminal_rewards # + T(s')
     return rewards

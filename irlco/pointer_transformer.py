@@ -129,7 +129,7 @@ class TwinDecoderPointerTransformer(Transformer):
     rewards.
     """
     def __init__(self, d_input: int, d_model: int, nhead: int, num_encoder_layers: int, num_decoder_layers: int, dim_feedforward: int,
-                 dropout: float, activation: str = "relu"):
+                 dropout: float, activation: str = "relu", shared_encoder=True):
         super(Transformer, self).__init__()
 
         encoder_layer = TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout, activation)
@@ -139,6 +139,10 @@ class TwinDecoderPointerTransformer(Transformer):
         self.input_embedding = Linear(d_input, d_model)
 
         self.encoder = TransformerEncoder(encoder_layer, num_encoder_layers, encoder_norm)
+        if shared_encoder:
+            self.reward_encoder = self.encoder
+        else:
+            self.reward_encoder = TransformerEncoder(encoder_layer, num_encoder_layers, encoder_norm)
 
         decoder_layer = TransformerDecoderLayer(d_model, nhead, dim_feedforward, dropout, activation)
         pointer_layer = PointerTransformerDecoderLayer(d_model, nhead, dim_feedforward, dropout, activation)
@@ -152,8 +156,7 @@ class TwinDecoderPointerTransformer(Transformer):
             nn.ReLU(),
             Linear(dim_feedforward, dim_feedforward),
             nn.ReLU(),
-            Linear(dim_feedforward, 1),
-            nn.Tanh()
+            Linear(dim_feedforward, 1)
         )
 
         self._reset_parameters()
@@ -187,9 +190,104 @@ class TwinDecoderPointerTransformer(Transformer):
                       memory_key_padding_mask: Optional[Tensor] = None) -> Tensor:
         embedded_src = self.input_embedding(src)
         embedded_tgt = self.input_embedding(tgt)
-        memory = self.encoder(embedded_src, mask=src_mask, src_key_padding_mask=src_key_padding_mask)
+        memory = self.reward_encoder(embedded_src, mask=src_mask, src_key_padding_mask=src_key_padding_mask)
         decoder_output = self.reward_decoder(embedded_tgt, memory, tgt_mask=tgt_mask, memory_mask=memory_mask,
                                              tgt_key_padding_mask=tgt_key_padding_mask,
                                              memory_key_padding_mask=memory_key_padding_mask)
         shaping_terms = self.reward_feedforward(decoder_output)
         return shaping_terms
+
+
+class KoolModel(torch.nn.Module):
+    def __init__(self):
+        super(torch.nn.Module, self).__init__()
+        # d_h = 256
+        # d_k = 256 / nheads = 256 / 8 = 32
+        encoder_layer = TransformerEncoderLayer(d_model=256, nhead=8, dim_feedforward=1024, dropout=0, activation='relu')
+        encoder_norm = nn.BatchNorm1d(num_features=256)
+
+        # Encoder input embedding
+        self.encoder_input_embedding = Linear(in_features=4, out_features=256)
+        self.encoder = TransformerEncoder(encoder_layer=encoder_layer, num_layers=3, norm=encoder_norm)
+
+        # Decoder
+        # Placeholder parameters for first decoding step
+        self.initial_decoding_state1 = torch.nn.Parameter(data=torch.empty(256))
+        self.initial_decoding_state2 = torch.nn.Parameter(data=torch.empty(256))
+
+        # Query, key and value projections for the first decoder layer (project for all heads simultaneously)
+        # in = 3*d_h = 3*256 for query, in = d_h = 256 for key and value,
+        # out = d_h = nb_heads * d_k = 256.
+        # We have nb_heads = 8 for the first decoder layer
+        self.query_proj1 = Linear(in_features=3 * 256, out_features=256, bias=False)
+        self.key_proj1 = Linear(in_features=256, out_features=256, bias=False)
+        self.value_proj1 = Linear(in_features=256, out_features=256, bias=False)
+        # Output projections for first layer - have one projection for each head
+        self.output_projs1 = [Linear(in_features=256 // 8, out_features=256, bias=False) for _ in range(8)]
+
+        # Query and key projections for the second decoder layer, which has only one head.
+        self.query_proj2 = Linear(in_features=256, out_features=256, bias=False)
+        self.key_proj2 = Linear(in_features=256, out_features=256, bias=False)
+
+        self._reset_parameters()
+
+    def encode(self, base_pairs):
+        # base_pairs shape: (episode_length, batch_size, 4)
+        embedded_input = self.encoder_input_embedding(base_pairs)
+        return self.encoder(embedded_input)
+
+    def forward(self, embedded_base_pairs, prev_actions):
+        # embedded_base_pairs shape: (episode_length, batch_size, d_h=256)
+        # prev_actions shape: (batch_size, t)
+        batch_size, t = prev_actions.shape
+        episode_length = embedded_base_pairs.shape[0]
+
+        # Compute context nodes
+        hbar = torch.mean(embedded_base_pairs, dim=0) # shape (batch_size, d_h=256)
+        if t == 0:
+            context = torch.cat((hbar, self.initial_decoding_state1.unsqueeze(0).repeat(batch_size, 1),
+                                 self.initial_decoding_state2.unsqueeze(0).repeat(batch_size, 1)), dim=1)
+        else:
+            prev_action_embeddings = embedded_base_pairs[prev_actions[:, -1], torch.arange(0, batch_size), :]
+            first_action_embeddings = embedded_base_pairs[prev_actions[:, 0], torch.arange(0, batch_size), :]
+            # shapes of above are (batch_size, d_h=256)
+
+            context = torch.cat((hbar, prev_action_embeddings, first_action_embeddings), dim=1)
+        # shape of context is (batch_size, 3*256)
+
+        # First decoder layer:
+        # Project queries, keys and values
+        queries1 = self.query_proj1(context) # shape is (batch_size, 256)
+        keys1 = self.key_proj1(embedded_base_pairs) # shape is (episode_length, batch_size, 256)
+        values1 = self.value_proj1(embedded_base_pairs) # shape is (episode_length, batch_size, 256)
+
+        # Create mask for attention scores: has shape (episode_length, batch_size)
+        # entry i, j = -infty if action i has been taken in episode j
+        mask = torch.zeros((episode_length, batch_size))
+        for j in range(batch_size):
+            mask[prev_actions[j, :], j] = float('-inf')
+
+        context2 = torch.zeros((batch_size, 256))
+        # Compute attention scores u and outputs for each head
+        for i in range(8):
+            # attention_scores has shape (episode_length, batch_size)
+            attention_scores = torch.sum(queries1[:, i*32:(i+1)*32] * keys1[:, :, i*32:(i+1)*32], dim=2) / (32**0.5)
+            # mask attention scores according to previously taken actions
+            attention_scores += mask
+            attention_weights = torch.softmax(attention_scores, dim=0) # shape is still (episode_length, batch_size)
+            # use weights to weight values: shape of weighted_sum is (batch_size, 32)
+            weighted_sum = torch.sum(values1[:, :, i*32:(i+1)*32] * attention_weights.unsqueeze(2), dim=0)
+            head_output = self.output_projs1[i](weighted_sum) # shape is (batch_size, 256)
+            context2 += head_output
+
+        # Second decoder layer:
+        queries2 = self.query_proj2(context2) # shape is (batch_size, 256)
+        keys2 = self.key_proj2(embedded_base_pairs) # shape is (episode_length, batch_size, 256)
+
+        # shape of final attention scores is (episode_length, batch_size)
+        final_attention_scores = torch.sum(queries2 * keys2, dim=2) / (256**0.5)
+        # clip and mask to get log-probabilities
+        log_probabilities = torch.tanh(final_attention_scores) * 10 + mask # shape still (episode_length, batch_size)
+        # softmax to get probabilities
+        action_probabilities = torch.softmax(log_probabilities, dim=0) # shape still (episode_length, batch_size)
+        return action_probabilities

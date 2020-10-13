@@ -134,7 +134,8 @@ def beam_search_decode2(initial_states, policy_net, beam_width, device=torch.dev
     return batch_action_sequences, batch_trajectory_probs, measures, successes
 
 
-def sample_best_of_n_trajectories(env, initial_states, policy_net, n_sample, device=torch.device('cuda')):
+def sample_best_of_n_trajectories(env, initial_states, policy_net, n_sample, device=torch.device('cuda'),
+                                  return_all_probs=False):
     assert initial_states[1].shape[1] == 0, "The provided states are not initial states!"
 
     episode_length = initial_states[0].shape[0]
@@ -147,6 +148,8 @@ def sample_best_of_n_trajectories(env, initial_states, policy_net, n_sample, dev
     best_actions = torch.zeros_like(trajectory_probs, dtype=torch.long)
     best_measures = torch.zeros((batch_size, 1), device=device) * float('inf')
     best_successes = torch.zeros_like(best_measures, dtype=torch.bool)
+    if return_all_probs:
+        best_all_probs = torch.zeros((batch_size, episode_length, episode_length), device=device)
 
     # Sample n_sample trajectories from each initial state according to the current policy, returning only the best
     for n in range(n_sample):
@@ -160,7 +163,12 @@ def sample_best_of_n_trajectories(env, initial_states, policy_net, n_sample, dev
             tgt_mask = generate_square_subsequent_mask(t + 1)
             memory_masks = generate_batch_of_sorted_element_masks(prev_actions, episode_length, nb_heads)
 
-            action_probs = policy_net(base_pairs, decoder_input, tgt_mask=tgt_mask, memory_mask=memory_masks)[:, -1, :]
+            if return_all_probs and t == episode_length - 1:
+                all_probs = policy_net(base_pairs, decoder_input, tgt_mask=tgt_mask, memory_mask=memory_masks)
+                action_probs = all_probs[:, -1, :]
+            else:
+                action_probs = policy_net(base_pairs, decoder_input, tgt_mask=tgt_mask, memory_mask=memory_masks)[:, -1, :]
+
             actions = torch.multinomial(action_probs, 1)
 
             states, _ = env.step(actions)
@@ -185,8 +193,13 @@ def sample_best_of_n_trajectories(env, initial_states, policy_net, n_sample, dev
         best_actions = torch.where(is_improvement, actions, best_actions)
         best_measures = torch.where(is_improvement, measures, best_measures)
         best_successes = torch.where(is_improvement, successes, best_successes)
+        if return_all_probs:
+            best_all_probs = torch.where(is_improvement.unsqueeze(2), all_probs, best_all_probs)
 
-    return best_actions, best_trajectory_probs, best_measures, best_successes
+    if return_all_probs:
+        return best_actions, best_trajectory_probs, best_measures, best_successes, best_all_probs
+    else:
+        return best_actions, best_trajectory_probs, best_measures, best_successes
 
 
 def states_to_action_decoder_input(states, device=torch.device('cuda')):
