@@ -1,7 +1,7 @@
 This repository contains the code produced for my master's dissertation, "Learning Shaped Reward via Adversarial Imitation Learning for Combinatorial Optimisation".
 
 In my dissertation, I produced and analysed a method for learning to route circuits from exploration and demonstration. Unfortunately, I have not yet received permission to share
-the circuit routing code from the company I worked with, but all of the code on the ML/RL and analysis side are included in this repo.
+the circuit routing code from the company I worked with, but all of the code on the ML/RL and analysis side is included in this repo.
 
 The model I created is primarily inspired by the Transformer-based model from ["Attention, Learn to Solve Routing Problems!" (Kool et al. 2019)](https://arxiv.org/abs/1803.08475),
 while the adversarial training method is inspired by ["Learning Robust Rewards with Adversarial Inverse Reinforcement Learning" (Fu et al. 2018)](https://arxiv.org/abs/1710.11248).
