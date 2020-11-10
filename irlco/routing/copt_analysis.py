@@ -4,11 +4,22 @@ import copt
 
 
 def brute_force_mp(problem, queue):
+    """
+    Wraps copt.bruteForce so it can be ran in a separate Python process to prevent memory leakage. The memory that would
+    normally not be freed is now freed up when the process ends.
+    Args:
+        problem: Tuple of base pairs specifying the problem we want to brute force.
+        queue: multiprocessing.Queue to write the results to.
+    """
     solns = copt.bruteForce(problem)
     queue.put(solns)
 
 
 if __name__ == '__main__':
+    """
+    For each problem size, brute-force all solutions to 100 instances of that size and save the number of successful
+    solutions and measures of the successful solutions for those instances to csv files.
+    """
     freeze_support()
     queue = Queue()
     for problem_size in [6, 7, 8, 9]:

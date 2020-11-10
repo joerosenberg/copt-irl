@@ -7,9 +7,21 @@ from irlco.routing.policy import evaluate_terminal_states, states_to_action_deco
 
 @torch.no_grad()
 def greedy_rollout_baselines(base_pairs, action_sequences, env, net, device=torch.device('cuda')):
-    # Given a batch of base pairs and action sequences, compute the terminal reward obtained by decoding greedily
-    # from each timestep.
+    """
+    Computes the terminal rewards obtained if we had acted greedily (selected the most probable action) from each
+    time step instead of taking the given actions.
+    Args:
+        base_pairs: Tensor of base pairs of shape (instance_size, batch_size, 4).
+        action_sequences: Tensor of complete action sequences of shape (batch_size, instance_size).
+        env: BatchCircuitRoutingEnv that operates on batches of size batch_size.
+        net: The policy network to sample greedy actions from.
+        device: torch.device to perform computations and store tensors on.
 
+    Returns: Tensor of terminal rewards obtained by performing greedy rollouts. Has shape (batch_size, instance_size).
+
+    """
+    # Given a batch of base pairs and action sequences, compute the terminal reward obtained by decoding greedily
+    # from each time step.
     episode_length, batch_size, _ = base_pairs.shape
     baseline_rewards = torch.zeros((batch_size, episode_length), device=device)
 
@@ -23,6 +35,18 @@ def greedy_rollout_baselines(base_pairs, action_sequences, env, net, device=torc
 
 
 def greedy_rollout(base_pairs, actions_so_far, env, net, device=torch.device('cuda')):
+    """
+    Computes a greedy rollout from a single time step for a given batch of instances and previously taken actions.
+    Args:
+        base_pairs: Tensor of base pairs of shape (instance_size, batch_size, 4).
+        actions_so_far: Tensor of partial action sequences of shape (batch_size, T).
+        env: BatchCircuitRoutingEnv that operates on batches of size batch_size.
+        net: The policy network to get greedy actions from.
+        device: torch.device to perform computations and store tensors on.
+
+    Returns: The terminal states obtained by acting greedily from time T as a tuple (base_pairs, action_sequences).
+
+    """
     episode_length, batch_size, _ = base_pairs.shape
     T = actions_so_far.shape[1]
     nb_heads = net.nhead

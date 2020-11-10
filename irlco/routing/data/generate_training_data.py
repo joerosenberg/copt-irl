@@ -5,7 +5,6 @@ from tqdm import tqdm
 import os.path
 from pathlib import Path
 import re
-import gc
 from multiprocessing import Process, Queue
 
 
@@ -13,7 +12,7 @@ def top_solutions(problem_instance, n_top: int) -> List[Dict]:
     """
     Finds the n_top best solutions using brute force search.
     Args:
-        problem_instance: Description of the problem instance.
+        problem_instance: Description of the problem instance as a tuple of base pairs.
         n_top: Number of solutions to return.
 
     Returns:
@@ -33,12 +32,28 @@ def top_solutions(problem_instance, n_top: int) -> List[Dict]:
 
 
 def top_solutions_mp(problem_instance, n_top: int, queue: Queue):
-    # Wraps top_solutions so it can be run in a separate process.
+    """
+    Wraps top_solutions so it can be run in a separate process.
+
+    Args:
+        problem_instance: Description of the problem instance as a tuple of base pairs.
+        n_top: Number of solutions to return.
+        queue: multiprocessing.Queue to write the top solutions to.
+
+    """
     result = top_solutions(problem_instance, n_top)
     queue.put(result)
 
 
 def generate_data(config_path):
+    """
+
+    Args:
+        config_path:
+
+    Returns:
+
+    """
     config_file = open(config_path)
     configs = yaml.load_all(config_file)
     queue = Queue()

@@ -2,17 +2,17 @@ import copt
 import torch
 from irlco.masking import generate_square_subsequent_mask, generate_batch_of_sorted_element_masks
 from irlco.routing.env import BatchCircuitRoutingEnv
-from multiprocessing import Pool
-
 from irlco.routing.mp_evaluation import mp_evaluate
 
 
-def greedy_decode(env, initial_states, policy_net, device=torch.device('cuda')):
+def greedy_decode(env, initial_states, policy_net, device=torch.device('cuda'), return_all_probs=False):
     episode_length = initial_states[0].shape[0]
     batch_size = initial_states[0].shape[1]
     nb_heads = policy_net.nhead
 
     trajectory_probs = torch.zeros((batch_size, episode_length), device=device)
+    if return_all_probs:
+        policy_probs = torch.zeros((batch_size, episode_length, episode_length), device=device)
 
     states = env.reset(instances=initial_states[0])
 
@@ -28,13 +28,19 @@ def greedy_decode(env, initial_states, policy_net, device=torch.device('cuda')):
         states, _ = env.step(actions)
 
         trajectory_probs[:, t] = action_probs[torch.arange(0, batch_size), actions.squeeze()]
+        if return_all_probs:
+            policy_probs[:, t, :] = action_probs
 
     measures, successes = evaluate_terminal_states(states, device=device)
     _, actions = states
-    return actions, trajectory_probs, measures, successes
+
+    if return_all_probs:
+        return actions, trajectory_probs, measures, successes, policy_probs
+    else:
+        return actions, trajectory_probs, measures, successes
 
 
-def beam_search_decode(env, initial_states, policy_net, beam_width, device=torch.device('cuda')):
+def beam_search_decode3(env, initial_states, policy_net, beam_width, device=torch.device('cuda')):
     """
 
     Args:
@@ -86,7 +92,8 @@ def beam_search_decode(env, initial_states, policy_net, beam_width, device=torch
 
         # Reshape action probs to calculate log-probs of each of the trajectories we just expanded on
         # new_log_joint_trajectory_probs has shape (batch_size, beam_width, k)
-        new_log_joint_trajectory_probs += torch.log(topk_next_action_probs.squeeze(2).T.reshape(batch_size, beam_width, k))
+        new_log_joint_trajectory_probs += torch.log(
+            topk_next_action_probs.squeeze(2).T.reshape(batch_size, beam_width, k))
 
         # reshape again to find {beam_width} most probable trajectories for each input
         log_trajectory_probs, best_trajectory_idx = torch.topk(
@@ -109,7 +116,7 @@ def beam_search_decode2(initial_states, policy_net, beam_width, device=torch.dev
         log_joint_trajectory_probs = torch.zeros(beam_width, device=device)
         for t in range(episode_length):
             decoder_input = states_to_action_decoder_input((encoder_input, best_action_sequences), device=device)
-            tgt_mask = generate_square_subsequent_mask(t+1)
+            tgt_mask = generate_square_subsequent_mask(t + 1)
             memory_masks = generate_batch_of_sorted_element_masks(best_action_sequences, episode_length, nb_heads)
             next_action_probs = policy_net(encoder_input, decoder_input,
                                            tgt_mask=tgt_mask, memory_mask=memory_masks)[:, -1, :]
@@ -118,7 +125,8 @@ def beam_search_decode2(initial_states, policy_net, beam_width, device=torch.dev
             # Get k next most probable actions + their probabilities
             expanded_action_probs, expanded_actions = torch.topk(next_action_probs.unsqueeze(2), k, dim=0)
             # Add the k most probable actions onto the existing trajectories to get beam_size * k possible trajectories
-            expanded_trajectories = torch.cat((torch.repeat_interleave(best_action_sequences, k, dim=0), expanded_actions.flatten()), dim=1)
+            expanded_trajectories = torch.cat(
+                (torch.repeat_interleave(best_action_sequences, k, dim=0), expanded_actions.flatten()), dim=1)
             # Calculate log-probabilities of the expanded trajectories
             log_expanded_trajectory_probs = torch.repeat_interleave(log_joint_trajectory_probs, k, dim=0) \
                                             + torch.log(expanded_action_probs)
@@ -134,8 +142,96 @@ def beam_search_decode2(initial_states, policy_net, beam_width, device=torch.dev
     return batch_action_sequences, batch_trajectory_probs, measures, successes
 
 
+def beam_search_decode(initial_states, policy_net, beam_width, device=torch.device('cuda')):
+    episode_length, batch_size, _ = initial_states[0].shape
+    nb_heads = policy_net.nhead
+
+    base_pairs, _ = initial_states
+
+    # Compute top {beam_width} initial actions
+    decoder_input = states_to_action_decoder_input(initial_states, device=device)
+    trajectories = torch.zeros((batch_size * beam_width, episode_length), device=device, dtype=torch.long)
+    tgt_mask = generate_square_subsequent_mask(1)
+    memory_masks = generate_batch_of_sorted_element_masks(torch.zeros((batch_size, 0), dtype=torch.long, device=device),
+                                                          episode_length, nb_heads)
+    initial_action_probs = policy_net(base_pairs, decoder_input, tgt_mask=tgt_mask, memory_mask=memory_masks)[:, 0, :]
+    a, b = torch.topk(initial_action_probs, beam_width, dim=1)
+    # Shape of trajectory_probs is (batch_size * beam_width,)
+    trajectory_probs = a.flatten()
+    trajectories[:, 0] = b.flatten()
+    trajectory_log_probs = torch.log(trajectory_probs)
+
+    rep_base_pairs = base_pairs.repeat_interleave(beam_width, dim=1)
+
+    for t in range(1, episode_length):
+        decoder_input = states_to_action_decoder_input((rep_base_pairs, trajectories[:, :t]), device=device)
+        tgt_mask = generate_square_subsequent_mask(t + 1)
+        memory_masks = generate_batch_of_sorted_element_masks(trajectories[:, :t], episode_length, nb_heads)
+
+        # shape of next_action_probs is (batch_size * beam_width, episode_length)
+        next_action_probs = policy_net(rep_base_pairs, decoder_input, tgt_mask=tgt_mask, memory_mask=memory_masks)[:, -1, :]
+
+        for b in range(batch_size):
+            # Find the best expanded trajectories for instance b
+            # Calculate trajectory log-probs
+            # Shape of instance_next_action_probs is (beam_width, episode_length)
+            instance_next_action_probs = next_action_probs[b * beam_width:(b + 1) * beam_width, :]
+            # Shape of instance_trajs_so_far is (beam_width, t)
+            instance_trajs_so_far = trajectories[b * beam_width:(b + 1) * beam_width, :t]
+            # Shape of instance_expanded_trajs is (beam_width * episode_length, t+1)
+            instance_expanded_trajs = torch.cat((instance_trajs_so_far.repeat_interleave(episode_length, dim=0),
+                                                 torch.arange(0, episode_length, device=device,
+                                                              dtype=torch.long).repeat(beam_width).unsqueeze(1)), dim=1)
+
+            instance_trajs_so_far_log_probs = trajectory_log_probs[b * beam_width:(b + 1) * beam_width]  # (beam_width,)
+            # Shape of instance_expanded_traj_log_probs is (beam_width * episode_length)
+            instance_expanded_traj_log_probs = instance_trajs_so_far_log_probs.repeat_interleave(episode_length, dim=0) \
+                                               + torch.log(instance_next_action_probs.flatten() + 1e-8)
+            # Find best trajs
+            best_instance_expanded_traj_log_probs, best_instance_idx = torch.topk(instance_expanded_traj_log_probs, beam_width)
+            # Update stored trajectories and log probs
+            trajectory_log_probs[b*beam_width:(b+1)*beam_width] = best_instance_expanded_traj_log_probs
+            trajectories[b*beam_width:(b+1)*beam_width, :(t+1)] = instance_expanded_trajs[best_instance_idx, :]
+
+    # Evaluate all trajectories and return the one with the lowest cost for each instance
+    # Shape of measures and successes is (batch_size*beam_width, 1)
+    measures, successes = evaluate_terminal_states((rep_base_pairs, trajectories), device=device)
+    best_trajs = torch.zeros((batch_size, episode_length), dtype=torch.long, device=device)
+    best_measures = torch.zeros((batch_size, 1), device=device)
+    best_successes = torch.zeros((batch_size, 1), dtype=torch.bool, device=device)
+    for b in range(batch_size):
+        instance_measures = measures[b*beam_width:(b+1)*beam_width, 0]
+        instance_successes = successes[b*beam_width:(b+1)*beam_width, 0]
+        # If none are successful, return the trajectory with the highest log-probability
+        if torch.logical_not(instance_successes).all():
+            best_measures[b, 0] = instance_measures[0]
+            best_successes[b, 0] = False
+            best_trajs[b, :] = trajectories[b*beam_width, :]
+        else:
+            # Otherwise return the successful trajectory with the lowest measure
+            best_idx = torch.argmin(instance_measures.masked_fill(torch.logical_not(instance_successes), float('inf')))
+            best_measures[b, 0] = instance_measures[best_idx]
+            best_successes[b, 0] = True
+            best_trajs[b, :] = trajectories[b*beam_width + best_idx, :]
+
+    return best_trajs, best_measures, best_successes
+
+
 def sample_best_of_n_trajectories(env, initial_states, policy_net, n_sample, device=torch.device('cuda'),
                                   return_all_probs=False):
+    """
+    Given a set o f
+    Args:
+        env:
+        initial_states:
+        policy_net:
+        n_sample:
+        device:
+        return_all_probs:
+
+    Returns:
+
+    """
     assert initial_states[1].shape[1] == 0, "The provided states are not initial states!"
 
     episode_length = initial_states[0].shape[0]
@@ -167,7 +263,8 @@ def sample_best_of_n_trajectories(env, initial_states, policy_net, n_sample, dev
                 all_probs = policy_net(base_pairs, decoder_input, tgt_mask=tgt_mask, memory_mask=memory_masks)
                 action_probs = all_probs[:, -1, :]
             else:
-                action_probs = policy_net(base_pairs, decoder_input, tgt_mask=tgt_mask, memory_mask=memory_masks)[:, -1, :]
+                action_probs = policy_net(base_pairs, decoder_input, tgt_mask=tgt_mask, memory_mask=memory_masks)[:, -1,
+                               :]
 
             actions = torch.multinomial(action_probs, 1)
 
@@ -245,8 +342,6 @@ def evaluate_terminal_states(terminal_states, device=torch.device('cuda')):
         successes[i, 0] = success
 
     return measures.to(device), successes.to(device)
-
-
 
 
 def trajectory_action_probabilities(terminal_states, policy_net, device=torch.device('cuda')):

@@ -19,3 +19,19 @@ logs/
 
 */wandb/
 wandb/
+
+# Ignore saved models
+irlco/routing/saved_models/
+
+# Ignore pycharm config
+.idea/
+
+# Ignore pycache
+__pycache__/
+
+# Pickled files
+*.pkl
+irlco/sorting/__pycache__/__init__.cpython-37.pyc
+*.pyc
+*.pyc
+*.pyc

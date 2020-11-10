@@ -1,13 +1,10 @@
-from random import randint
-
 import torch
 import wandb
 import irlco.pointer_transformer as pt
 from irlco.routing.baselines import greedy_rollout_baselines
 from irlco.routing.data import CircuitSolutionDataset
 from irlco.routing.env import BatchCircuitRoutingEnv, measures_to_terminal_rewards
-from irlco.routing.policy import sample_best_of_n_trajectories, trajectory_action_probabilities, greedy_decode, \
-    beam_search_decode, evaluate_terminal_states
+from irlco.routing.policy import sample_best_of_n_trajectories, trajectory_action_probabilities, greedy_decode
 import pickle
 import os
 from multiprocessing import freeze_support
@@ -32,11 +29,11 @@ if __name__ == '__main__':
     freeze_support()
 
     # Transformer model parameters
-    EMBEDDING_DIM = 128
+    EMBEDDING_DIM = 64
     NB_HEADS = 8
     FF_DIM = 512
     DROPOUT = 0.0
-    NB_ENCODER_LAYERS = 5
+    NB_ENCODER_LAYERS = 3
     NB_DECODER_LAYERS = 3
 
     # Environment parameters
@@ -44,24 +41,19 @@ if __name__ == '__main__':
     MAX_INSTANCE_SIZE = 9
 
     # Training parameters
-    NB_INSTANCES_PER_BATCH = 4  # Number of unique circuit routing problems to consider in each batch
-    NB_TRAJECTORIES_PER_INSTANCE = 128  # Number of trajectories to sample for each unique circuit routing problem
+    NB_INSTANCES_PER_BATCH = 512  # Number of unique circuit routing problems to consider in each batch
+    NB_TRAJECTORIES_PER_INSTANCE = 1  # Number of trajectories to sample for each unique circuit routing problem
     BATCH_SIZE = NB_TRAJECTORIES_PER_INSTANCE * NB_INSTANCES_PER_BATCH
     NB_EPISODES = 20_000
-    LR = 1e-5  # Optimizer learning rate
+    LR = 1e-4  # Optimizer learning rate
     EPS = 1e-8  # Add when computing log-probabilities from probabilities to avoid numerical instability
     DEVICE = torch.device('cuda')
-    ENTROPY_REGULARISATION_WEIGHT = 0.0
-    TRAIN_DECODING_METHOD = 'sample' # greedy or sample
+    ENTROPY_REGULARISATION_WEIGHT = 0.1
 
     # Qualitative training parameters
     BASELINE_METHOD = 'none'  # 'greedy' for greedy rollouts or 'none'
-    REWARD_SHAPING_METHOD = 'ail'  # 'ail' for adversarial imitation learning or 'none'
-    SHARED_AIL_ENCODER = False  # Whether or not to share the transformer encoder between the policy and discriminator
-
-    PRETRAIN_DISCRIMINATOR = False  # Train discriminator to get shaped reward
-    NB_PRETRAIN_BATCHES = 1000
-    PRETRAIN_BATCH_SIZE = 512
+    REWARD_SHAPING_METHOD = 'none'  # 'ail' for adversarial imitation learning or 'none'
+    SHARED_AIL_ENCODER = True  # Whether or not to share the transformer encoder between the policy and discriminator
 
     # Adversarial imitation learning (reward shaping) parameters
     NB_EXPERT_SAMPLES = BATCH_SIZE  # Keep it equal to batch size for now, so that the discriminator sees an equal
@@ -74,11 +66,11 @@ if __name__ == '__main__':
     # Test parameters
     TEST_INTERVAL = 25
     TEST_BATCH_SIZE = 256
-    TEST_DECODING_METHOD = 'beam'  # or 'sampling' or 'beam'
+    TEST_DECODING_METHOD = 'greedy'  # or 'sampling'
     NB_TEST_SAMPLES = 128  # Number of samples to take if decoding method is 'sampling'
 
     # Model saving interval
-    SAVE_INTERVAL = 25
+    SAVE_INTERVAL = TEST_INTERVAL
 
     # Data file paths
     TEST_DATA_PATH = './data/test_data_config.yaml'
@@ -105,10 +97,7 @@ if __name__ == '__main__':
         'shared_ail_encoder': SHARED_AIL_ENCODER,
         'nb_expert_samples': NB_EXPERT_SAMPLES,
         'ppo_clipping_parameter': PPO_EPS,
-        'use_actions_probs_for_discriminator': USE_ACTION_PROBS_FOR_DISCRIMINATOR,
-        'train_decoding_method': TRAIN_DECODING_METHOD,
-        'test_decoding_method': TEST_DECODING_METHOD,
-        'nb_test_samples': NB_TEST_SAMPLES
+        'use_actions_probs_for_discriminator': USE_ACTION_PROBS_FOR_DISCRIMINATOR
     })
 
     # Environments for sampling unique problems, stepping forward during training, and testing
@@ -116,9 +105,7 @@ if __name__ == '__main__':
     env = BatchCircuitRoutingEnv(BATCH_SIZE, MIN_INSTANCE_SIZE, MAX_INSTANCE_SIZE)
     test_env = BatchCircuitRoutingEnv(TEST_BATCH_SIZE, MIN_INSTANCE_SIZE, MAX_INSTANCE_SIZE)
     # Shared net for policy + shaped rewards
-    net = pt.TwinDecoderPointerTransformer(4, d_model=EMBEDDING_DIM, nhead=NB_HEADS, num_encoder_layers=NB_ENCODER_LAYERS,
-                                           num_decoder_layers=NB_DECODER_LAYERS, dim_feedforward=FF_DIM, dropout=DROPOUT,
-                                           shared_encoder=SHARED_AIL_ENCODER).cuda()
+    net = pt.KoolModel().cuda()
 
     optimizer = torch.optim.Adam(net.parameters(), lr=LR)
     wandb.watch(net)
@@ -128,9 +115,7 @@ if __name__ == '__main__':
 
     if BASELINE_METHOD == 'greedy':
         # Create baseline net with same parameters as net
-        baseline_net = pt.TwinDecoderPointerTransformer(4, d_model=EMBEDDING_DIM, nhead=NB_HEADS, num_encoder_layers=NB_ENCODER_LAYERS,
-                                           num_decoder_layers=NB_DECODER_LAYERS, dim_feedforward=FF_DIM, dropout=DROPOUT,
-                                           shared_encoder=SHARED_AIL_ENCODER).cuda()
+        baseline_net = pt.KoolModel()
         baseline_net.load_state_dict(net.state_dict())
         baseline_net.eval()
     elif BASELINE_METHOD == 'none':
@@ -145,50 +130,6 @@ if __name__ == '__main__':
     test_data = load_pickled_data(TEST_DATA_PATH, TEST_DATA_PICKLE_PATH)
     expert_data = load_pickled_data(EXPERT_DATA_PATH, EXPERT_DATA_PICKLE_PATH)
 
-    if PRETRAIN_DISCRIMINATOR:
-        for i in range(NB_PRETRAIN_BATCHES):
-            episode_length = randint(MIN_INSTANCE_SIZE, MAX_INSTANCE_SIZE)
-            base_pairs, expert_actions, expert_measures = expert_data.get_batch(episode_length, PRETRAIN_BATCH_SIZE, DEVICE)
-            expert_actions = expert_actions.T
-            expert_terminal_rewards = measures_to_terminal_rewards(episode_length, expert_measures)
-
-            # Generate random actions
-            random_actions = torch.zeros((PRETRAIN_BATCH_SIZE, episode_length), dtype=torch.long, device=DEVICE)
-            for b in range(PRETRAIN_BATCH_SIZE):
-                random_actions[b, :] = torch.randperm(episode_length, device=DEVICE)
-
-            # Evaluate random solutions
-            random_measures, random_successes = evaluate_terminal_states((base_pairs, random_actions), device=DEVICE)
-            random_terminal_rewards = measures_to_terminal_rewards(episode_length, random_measures, successes=random_successes)
-
-            # Combine expert and random solutions into one tensor for batch computation
-            disc_actions = torch.cat((random_actions, expert_actions), dim=0)
-            disc_base_pairs = torch.cat((base_pairs, base_pairs), dim=1)
-            disc_terminal_rewards = torch.cat((random_terminal_rewards, expert_terminal_rewards), dim=0)
-
-            # Compute shaping terms
-            disc_shaping_terms = compute_shaping_terms((disc_base_pairs, disc_actions), net)
-            disc_rewards = shaping_terms_to_rewards(disc_shaping_terms, disc_terminal_rewards).squeeze(2).T
-
-            # Compute classifier probabilities
-            is_expert_transition_probs = torch.exp(disc_rewards) / (1 + torch.exp(disc_rewards))
-
-            # Compute discriminator loss
-            discriminator_loss = - (
-                    torch.sum(torch.log(1 - is_expert_transition_probs[:PRETRAIN_BATCH_SIZE, :])) +
-                    torch.sum(torch.log(is_expert_transition_probs[PRETRAIN_BATCH_SIZE:, :]))
-            ) / (PRETRAIN_BATCH_SIZE * 2)
-            discriminator_loss.backward()
-            optimizer.step()
-
-            # Log discriminator loss
-            wandb.log({'pretrain_discriminator_loss': discriminator_loss})
-
-        # Copy reward encoder model weights to policy encoder
-        net.encoder.load_state_dict(net.reward_encoder.state_dict())
-        # Save pretrained model
-        torch.save(net.state_dict(), f'./saved_models/{wandb.run.name}/{wandb.run.name}_pretrained_model')
-
     for i in range(NB_EPISODES):
         ''' Sample trajectories '''
         # Sample NB_INSTANCES_PER_BATCH unique circuit routing problems
@@ -199,15 +140,10 @@ if __name__ == '__main__':
         episode_length = base_pairs.shape[0]
 
         # Sample trajectories according to policy given by net
-        if TRAIN_DECODING_METHOD == 'sample':
-            actions, action_probs, measures, successes, all_action_probs = sample_best_of_n_trajectories(env, states,
-                                                                                                         net, 1,
-                                                                                                         return_all_probs=True)
-        elif TRAIN_DECODING_METHOD == 'greedy':
-            actions, action_probs, measures, successes, all_action_probs = greedy_decode(env, states, net,
-                                                                                         return_all_probs=True)
+        if ENTROPY_REGULARISATION_WEIGHT > 0:
+            actions, action_probs, measures, successes, all_action_probs = net.sample_decode(states, env)
         else:
-            raise Exception
+            actions, action_probs, measures, successes = sample_best_of_n_trajectories(env, states, net, 1)
 
         ''' Compute rewards and returns '''
         # Compute terminal rewards for each solution
@@ -295,10 +231,7 @@ if __name__ == '__main__':
                 instances, solutions, test_measures = test_data.get_batch(test_episode_length, TEST_BATCH_SIZE, DEVICE)
                 test_states = test_env.reset(instances=instances)
                 with torch.no_grad():
-                    if TEST_DECODING_METHOD == 'greedy':
-                        _, _, measures, successes, = greedy_decode(test_env, test_states, net, device=DEVICE)
-                    elif TEST_DECODING_METHOD == 'beam':
-                        _, measures, successes = beam_search_decode(test_states, net, beam_width=test_episode_length, device=DEVICE)
+                    _, _, measures, successes, _ = net.greedy_decode(test_states, test_env)
                     optimality_gaps = (1 - test_measures / measures).masked_fill(torch.logical_not(successes), 1)
                     mean_optimality_gap = optimality_gaps.mean()  # For this instance size
                     success_rate = successes.float().mean()  # For this instance size

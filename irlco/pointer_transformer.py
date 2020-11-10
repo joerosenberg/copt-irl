@@ -5,6 +5,12 @@ from torch.nn import TransformerDecoderLayer, TransformerDecoder, Transformer, T
 from torch import Tensor
 from typing import Optional, Callable, Tuple
 
+from torch.nn.init import xavier_uniform_
+
+from irlco.routing.policy import evaluate_terminal_states
+
+from irlco.pointer_multihead import PointerMultiheadAttention
+
 
 class PointerTransformerDecoderLayer(nn.Module):
     """
@@ -37,19 +43,18 @@ class PointerTransformerDecoderLayer(nn.Module):
         tgt = self.norm(tgt)
         # Instead of returning the attention-weighted sum, return the weights over the source sequence for the last
         # element of the target sequence
-        weights = self.multihead_attn(tgt, memory, memory, attn_mask=memory_mask,
+        scores = self.multihead_attn(tgt, memory, memory, attn_mask=memory_mask,
                                       key_padding_mask=memory_key_padding_mask)[1]
-
         # Clip weights into [-10, 10] using tanh to get scores for actions
-        scores = self.tanh(weights) * 10.0
+        clipped_scores = self.tanh(scores) * 10.0
 
         # Mask actions and calculate probabilities (masking for actions that have already been selected)
         bsize = tgt.shape[1]
         idx = torch.arange(0, bsize * self.nhead, self.nhead, dtype=torch.int64)
-        scores = scores + memory_mask[idx, :, :]
+        clipped_scores = clipped_scores + memory_mask[idx, :, :]
         # Take softmax over last index, since that is the index corresponding to the source sequence and we want a
         # probability distribution over the source sequence.
-        probs = self.softmax(scores)
+        probs = self.softmax(clipped_scores)
 
         # We don't take softmax here because the log probabilities are used when calculating the policy objective
         return probs
@@ -200,11 +205,12 @@ class TwinDecoderPointerTransformer(Transformer):
 
 class KoolModel(torch.nn.Module):
     def __init__(self):
-        super(torch.nn.Module, self).__init__()
+        super().__init__()
         # d_h = 256
         # d_k = 256 / nheads = 256 / 8 = 32
         encoder_layer = TransformerEncoderLayer(d_model=256, nhead=8, dim_feedforward=1024, dropout=0, activation='relu')
-        encoder_norm = nn.BatchNorm1d(num_features=256)
+        #encoder_norm = nn.BatchNorm1d(num_features=256)
+        encoder_norm = nn.LayerNorm(256)
 
         # Encoder input embedding
         self.encoder_input_embedding = Linear(in_features=4, out_features=256)
@@ -223,7 +229,7 @@ class KoolModel(torch.nn.Module):
         self.key_proj1 = Linear(in_features=256, out_features=256, bias=False)
         self.value_proj1 = Linear(in_features=256, out_features=256, bias=False)
         # Output projections for first layer - have one projection for each head
-        self.output_projs1 = [Linear(in_features=256 // 8, out_features=256, bias=False) for _ in range(8)]
+        self.output_projs1 = nn.ModuleList([Linear(in_features=256 // 8, out_features=256, bias=False) for _ in range(8)])
 
         # Query and key projections for the second decoder layer, which has only one head.
         self.query_proj2 = Linear(in_features=256, out_features=256, bias=False)
@@ -235,6 +241,58 @@ class KoolModel(torch.nn.Module):
         # base_pairs shape: (episode_length, batch_size, 4)
         embedded_input = self.encoder_input_embedding(base_pairs)
         return self.encoder(embedded_input)
+
+    def sample_decode(self, initial_states, env):
+        base_pairs, _ = initial_states
+        states = env.reset(instances=base_pairs)
+        episode_length, batch_size, _ = base_pairs.shape
+
+        embedded_base_pairs = self.encode(base_pairs)
+
+        trajectory_probs = torch.zeros((batch_size, episode_length)).cuda()
+        policy_probs = torch.zeros((batch_size, episode_length, episode_length)).cuda()
+
+        for t in range(episode_length):
+            base_pairs, prev_actions = states
+
+            action_probs = self.forward(embedded_base_pairs, prev_actions)
+            actions = torch.multinomial(action_probs.T, 1)
+
+            policy_probs[:, t, :] = action_probs.T.clone()
+            trajectory_probs[:, t] = action_probs[actions.squeeze(), torch.arange(0, batch_size)]
+
+            states, _ = env.step(actions)
+
+        _, actions = states
+        measures, successes = evaluate_terminal_states(states)
+
+        return actions, trajectory_probs, measures, successes, policy_probs
+
+    def greedy_decode(self, initial_states, env):
+        base_pairs, _ = initial_states
+        states = env.reset(instances=base_pairs)
+        episode_length, batch_size, _ = base_pairs.shape
+
+        embedded_base_pairs = self.encode(base_pairs)
+
+        trajectory_probs = torch.zeros((batch_size, episode_length)).cuda()
+        policy_probs = torch.zeros((batch_size, episode_length, episode_length)).cuda()
+
+        for t in range(episode_length):
+            base_pairs, prev_actions = states
+
+            action_probs = self.forward(embedded_base_pairs, prev_actions)
+            actions = torch.argmax(action_probs, dim=0).unsqueeze(1)
+
+            policy_probs[:, t, :] = action_probs.T.clone()
+            trajectory_probs[:, t] = action_probs[actions.squeeze(), torch.arange(0, batch_size)]
+
+            states, _ = env.step(actions)
+
+        _, actions = states
+        measures, successes = evaluate_terminal_states(states)
+
+        return actions, trajectory_probs, measures, successes, policy_probs
 
     def forward(self, embedded_base_pairs, prev_actions):
         # embedded_base_pairs shape: (episode_length, batch_size, d_h=256)
@@ -263,11 +321,11 @@ class KoolModel(torch.nn.Module):
 
         # Create mask for attention scores: has shape (episode_length, batch_size)
         # entry i, j = -infty if action i has been taken in episode j
-        mask = torch.zeros((episode_length, batch_size))
+        mask = torch.zeros((episode_length, batch_size)).cuda()
         for j in range(batch_size):
             mask[prev_actions[j, :], j] = float('-inf')
 
-        context2 = torch.zeros((batch_size, 256))
+        context2 = torch.zeros((batch_size, 256)).cuda()
         # Compute attention scores u and outputs for each head
         for i in range(8):
             # attention_scores has shape (episode_length, batch_size)
@@ -291,3 +349,12 @@ class KoolModel(torch.nn.Module):
         # softmax to get probabilities
         action_probabilities = torch.softmax(log_probabilities, dim=0) # shape still (episode_length, batch_size)
         return action_probabilities
+
+    def _reset_parameters(self):
+        for p in self.parameters():
+            if p.dim() > 1:
+                xavier_uniform_(p)
+            else:
+                torch.nn.init.uniform_(p)
+
+

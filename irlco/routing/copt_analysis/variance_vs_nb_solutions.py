@@ -2,7 +2,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 from math import factorial
 
-for problem_size in [6, 7, 8, 9]:
+fig, axs = plt.subplots(2, 2, sharey=True)
+axs = axs.flatten()
+colors = ['r', 'b', 'g', 'k']
+
+for j, problem_size in enumerate([6, 7, 8, 9]):
     nb_solutions_file = open(f'./nb_solutions_for_size_{problem_size}.csv', 'r')
     measures_file = open(f'./measures_for_size_{problem_size}.csv', 'r')
 
@@ -19,27 +23,12 @@ for problem_size in [6, 7, 8, 9]:
             ranges[i] = np.ptp(measures[measure_index: measure_index + nb_solution])
             measure_index += nb_solution
 
-    plt.figure()
-    plt.scatter(nb_solutions, stds)
-    plt.xlabel('Number of solutions')
-    plt.ylabel('Standard deviation of measure of all solutions')
-    plt.savefig(f'./variance_vs_nb_solutions_for_size_{problem_size}.png')
+    axs[j].scatter(nb_solutions / factorial(problem_size), ranges, label=f'Problems of size {problem_size}',
+                   color=colors[j], s=1.0)
+    axs[j].legend()
 
-    plt.figure()
-    plt.scatter(nb_solutions, ranges)
-    plt.xlabel('Number of solutions')
-    plt.ylabel('Range of measure across all solutions')
-    plt.savefig(f'./range_vs_nb_solutions_for_size_{problem_size}.png')
-
-    plt.figure()
-    plt.scatter(nb_solutions / factorial(problem_size), stds)
-    plt.xlabel('Proportion of valid solutions')
-    plt.ylabel('Standard deviation of measure of all solutions')
-    plt.savefig(f'./variance_vs_proportion_valid_for_size_{problem_size}.png')
-
-    plt.figure()
-    plt.scatter(nb_solutions / factorial(problem_size), ranges)
-    plt.xlabel('Proportion of valid solutions')
-    plt.ylabel('Range of measure across all solutions')
-    plt.savefig(f'./range_vs_proportion_valid_for_size_{problem_size}.png')
-
+fig.add_subplot(111, frameon=False)
+plt.tick_params(labelcolor='none', top=False, bottom=False, left=False, right=False)
+fig.text(0.5, 0.02, "Number of valid solutions as proportion of search space", ha='center')
+fig.text(0.02, 0.5, "Range of measures for valid solutions", va='center', rotation='vertical')
+fig.savefig(f'./range.png')
