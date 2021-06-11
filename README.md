@@ -1,4 +1,4 @@
-This repository contains the code produced for my master's dissertation, "Learning Shaped Reward via Adversarial Imitation Learning for Combinatorial Optimisation".
+This repository contains the code produced for my master's dissertation, "Learning Shaped Rewards via Adversarial Imitation Learning for Combinatorial Optimisation".
 
 In my dissertation, I produced and analysed a method for learning to route circuits from exploration and demonstration. Unfortunately, I have not yet received permission to share
 the circuit routing code from the company I worked with, but all of the code on the ML/RL and analysis side is included in this repo.
